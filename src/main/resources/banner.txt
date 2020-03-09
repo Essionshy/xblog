@@ -1,0 +1,13 @@
+${AnsiColor.BLUE}
+   __       __ ________＿＿＿＿
+   \ \     / / | |________| |
+    \ \   / /  | |        | |
+     \ \ / /   | |________| |
+      \ / /    | |________| |
+       / /     | |        | |
+      / / \    | |        | |
+     / / \ \   | |        | |
+    / /   \ \  | |        | |
+   /_/     \_\ |_|________|_|
+ ${AnsiColor.BRIGHT_YELLOW}
+ ::: Spring-Boot ${spring-boot.version}     ::: XBlog (version:${application.formatted-version})

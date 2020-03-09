@@ -1,0 +1,552 @@
+package com.tingyu.xblog.app.service.impl;
+
+import cn.hutool.core.util.StrUtil;
+import com.qiniu.common.Zone;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.lang.NonNull;
+import org.springframework.lang.Nullable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import com.tingyu.xblog.app.cache.StringCacheStore;
+import com.tingyu.xblog.app.config.properties.XBlogProperties;
+import com.tingyu.xblog.app.event.options.OptionUpdatedEvent;
+import com.tingyu.xblog.app.exception.MissingPropertyException;
+import com.tingyu.xblog.app.model.dto.OptionDTO;
+import com.tingyu.xblog.app.model.dto.OptionSimpleDTO;
+import com.tingyu.xblog.app.model.entity.Option;
+import com.tingyu.xblog.app.model.enums.PostPermalinkType;
+import com.tingyu.xblog.app.model.enums.ValueEnum;
+import com.tingyu.xblog.app.model.params.OptionParam;
+import com.tingyu.xblog.app.model.params.OptionQuery;
+import com.tingyu.xblog.app.model.properties.*;
+import com.tingyu.xblog.app.repository.OptionRepository;
+import com.tingyu.xblog.app.service.OptionService;
+import com.tingyu.xblog.app.service.base.AbstractCrudService;
+import com.tingyu.xblog.app.utils.DateUtils;
+import com.tingyu.xblog.app.utils.XBlogUtils;
+import com.tingyu.xblog.app.utils.ServiceUtils;
+import com.tingyu.xblog.app.utils.ValidationUtils;
+
+import javax.persistence.criteria.Predicate;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * OptionService implementation class
+ *
+ * @author ryanwang
+ * @date 2019-03-14
+ */
+@Slf4j
+@Service
+public class OptionServiceImpl extends AbstractCrudService<Option, Integer> implements OptionService {
+
+    private final OptionRepository optionRepository;
+    private final ApplicationContext applicationContext;
+    private final StringCacheStore cacheStore;
+    private final Map<String, PropertyEnum> propertyEnumMap;
+    private final ApplicationEventPublisher eventPublisher;
+    private XBlogProperties XBlogProperties;
+
+    public OptionServiceImpl(XBlogProperties XBlogProperties,
+                             OptionRepository optionRepository,
+                             ApplicationContext applicationContext,
+                             StringCacheStore cacheStore,
+                             ApplicationEventPublisher eventPublisher) {
+        super(optionRepository);
+        this.XBlogProperties = XBlogProperties;
+        this.optionRepository = optionRepository;
+        this.applicationContext = applicationContext;
+        this.cacheStore = cacheStore;
+        this.eventPublisher = eventPublisher;
+
+        propertyEnumMap = Collections.unmodifiableMap(PropertyEnum.getValuePropertyEnumMap());
+    }
+
+    @Deprecated
+    @Transactional
+    void save(@NonNull String key, @Nullable String value) {
+        Assert.hasText(key, "Option key must not be blank");
+        save(Collections.singletonMap(key, value));
+    }
+
+    @Override
+    @Transactional
+    public void save(Map<String, Object> optionMap) {
+        if (CollectionUtils.isEmpty(optionMap)) {
+            return;
+        }
+
+        Map<String, Option> optionKeyMap = ServiceUtils.convertToMap(listAll(), Option::getKey);
+
+        List<Option> optionsToCreate = new LinkedList<>();
+        List<Option> optionsToUpdate = new LinkedList<>();
+
+        optionMap.forEach((key, value) -> {
+            Option oldOption = optionKeyMap.get(key);
+            if (oldOption == null || !StringUtils.equals(oldOption.getValue(), value.toString())) {
+                OptionParam optionParam = new OptionParam();
+                optionParam.setKey(key);
+                optionParam.setValue(value.toString());
+                ValidationUtils.validate(optionParam);
+
+                if (oldOption == null) {
+                    // Create it
+                    optionsToCreate.add(optionParam.convertTo());
+                } else if (!StringUtils.equals(oldOption.getValue(), value.toString())) {
+                    // Update it
+                    optionParam.update(oldOption);
+                    optionsToUpdate.add(oldOption);
+                }
+            }
+        });
+
+        // Update them
+        updateInBatch(optionsToUpdate);
+
+        // Create them
+        createInBatch(optionsToCreate);
+
+        if (!CollectionUtils.isEmpty(optionsToUpdate) || !CollectionUtils.isEmpty(optionsToCreate)) {
+            // If there is something changed
+            publishOptionUpdatedEvent();
+        }
+
+    }
+
+    @Override
+    public void save(List<OptionParam> optionParams) {
+        if (CollectionUtils.isEmpty(optionParams)) {
+            return;
+        }
+
+        Map<String, Object> optionMap = ServiceUtils.convertToMap(optionParams, OptionParam::getKey, OptionParam::getValue);
+        save(optionMap);
+    }
+
+    @Override
+    public void save(OptionParam optionParam) {
+        Option option = optionParam.convertTo();
+        create(option);
+        publishOptionUpdatedEvent();
+    }
+
+    @Override
+    public void update(Integer optionId, OptionParam optionParam) {
+        Option optionToUpdate = getById(optionId);
+        optionParam.update(optionToUpdate);
+        update(optionToUpdate);
+        publishOptionUpdatedEvent();
+    }
+
+    @Override
+    public void saveProperty(PropertyEnum property, String value) {
+        Assert.notNull(property, "Property must not be null");
+
+        save(property.getValue(), value);
+    }
+
+    @Override
+    public void saveProperties(Map<? extends PropertyEnum, String> properties) {
+        if (CollectionUtils.isEmpty(properties)) {
+            return;
+        }
+
+        Map<String, Object> optionMap = new LinkedHashMap<>();
+
+        properties.forEach((property, value) -> optionMap.put(property.getValue(), value));
+
+        save(optionMap);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> listOptions() {
+        // Get options from cache
+        return cacheStore.getAny(OPTIONS_KEY, Map.class).orElseGet(() -> {
+            List<Option> options = listAll();
+
+            Set<String> keys = ServiceUtils.fetchProperty(options, Option::getKey);
+
+            Map<String, Object> userDefinedOptionMap = ServiceUtils.convertToMap(options, Option::getKey, option -> {
+                String key = option.getKey();
+
+                PropertyEnum propertyEnum = propertyEnumMap.get(key);
+
+                if (propertyEnum == null) {
+                    return option.getValue();
+                }
+
+                return PropertyEnum.convertTo(option.getValue(), propertyEnum);
+            });
+
+            Map<String, Object> result = new HashMap<>(userDefinedOptionMap);
+
+            // Add default property
+            propertyEnumMap.keySet()
+                .stream()
+                .filter(key -> !keys.contains(key))
+                .forEach(key -> {
+                    PropertyEnum propertyEnum = propertyEnumMap.get(key);
+
+                    if (StringUtils.isBlank(propertyEnum.defaultValue())) {
+                        return;
+                    }
+
+                    result.put(key, PropertyEnum.convertTo(propertyEnum.defaultValue(), propertyEnum));
+                });
+
+            // Cache the result
+            cacheStore.putAny(OPTIONS_KEY, result);
+
+            return result;
+        });
+    }
+
+    @Override
+    public Map<String, Object> listOptions(List<String> keys) {
+        if (CollectionUtils.isEmpty(keys)) {
+            return Collections.emptyMap();
+        }
+
+        Map<String, Object> optionMap = listOptions();
+
+        Map<String, Object> result = new HashMap<>(keys.size());
+
+        keys.stream()
+            .filter(optionMap::containsKey)
+            .forEach(key -> result.put(key, optionMap.get(key)));
+
+        return result;
+    }
+
+    @Override
+    public List<OptionDTO> listDtos() {
+        List<OptionDTO> result = new LinkedList<>();
+
+        listOptions().forEach((key, value) -> result.add(new OptionDTO(key, value)));
+
+        return result;
+    }
+
+    @Override
+    public Page<OptionSimpleDTO> pageDtosBy(Pageable pageable, OptionQuery optionQuery) {
+        Assert.notNull(pageable, "Page info must not be null");
+
+        Page<Option> optionPage = optionRepository.findAll(buildSpecByQuery(optionQuery), pageable);
+
+        return optionPage.map(this::convertToDto);
+    }
+
+    @Override
+    public Option removePermanently(Integer id) {
+        Option deletedOption = removeById(id);
+        publishOptionUpdatedEvent();
+        return deletedOption;
+    }
+
+    @NonNull
+    private Specification<Option> buildSpecByQuery(@NonNull OptionQuery optionQuery) {
+        Assert.notNull(optionQuery, "Option query must not be null");
+
+        return (Specification<Option>) (root, query, criteriaBuilder) -> {
+            List<Predicate> predicates = new LinkedList<>();
+
+            if (optionQuery.getType() != null) {
+                predicates.add(criteriaBuilder.equal(root.get("type"), optionQuery.getType()));
+            }
+
+            if (optionQuery.getKeyword() != null) {
+
+                String likeCondition = String.format("%%%s%%", StringUtils.strip(optionQuery.getKeyword()));
+
+                Predicate keyLike = criteriaBuilder.like(root.get("key"), likeCondition);
+
+                Predicate valueLike = criteriaBuilder.like(root.get("value"), likeCondition);
+
+                predicates.add(criteriaBuilder.or(keyLike, valueLike));
+            }
+
+            return query.where(predicates.toArray(new Predicate[0])).getRestriction();
+        };
+    }
+
+    @Override
+    public Object getByKeyOfNullable(String key) {
+        return getByKey(key).orElse(null);
+    }
+
+    @Override
+    public Object getByKeyOfNonNull(String key) {
+        return getByKey(key).orElseThrow(() -> new MissingPropertyException("You have to config " + key + " setting"));
+    }
+
+    @Override
+    public Optional<Object> getByKey(String key) {
+        Assert.hasText(key, "Option key must not be blank");
+
+        return Optional.ofNullable(listOptions().get(key));
+    }
+
+    @Override
+    public Object getByPropertyOfNullable(PropertyEnum property) {
+        return getByProperty(property).orElse(null);
+    }
+
+    @Override
+    public Object getByPropertyOfNonNull(PropertyEnum property) {
+        Assert.notNull(property, "Blog property must not be null");
+
+        return getByKeyOfNonNull(property.getValue());
+    }
+
+    @Override
+    public Optional<Object> getByProperty(PropertyEnum property) {
+        Assert.notNull(property, "Blog property must not be null");
+
+        return getByKey(property.getValue());
+    }
+
+    @Override
+    public <T> T getByPropertyOrDefault(PropertyEnum property, Class<T> propertyType, T defaultValue) {
+        Assert.notNull(property, "Blog property must not be null");
+
+        return getByProperty(property, propertyType).orElse(defaultValue);
+    }
+
+    @Override
+    public <T> T getByPropertyOrDefault(PropertyEnum property, Class<T> propertyType) {
+        return getByProperty(property, propertyType).orElse(property.defaultValue(propertyType));
+    }
+
+    @Override
+    public <T> Optional<T> getByProperty(PropertyEnum property, Class<T> propertyType) {
+        return getByProperty(property).map(propertyValue -> PropertyEnum.convertTo(propertyValue.toString(), propertyType));
+    }
+
+    @Override
+    public <T> T getByKeyOrDefault(String key, Class<T> valueType, T defaultValue) {
+        return getByKey(key, valueType).orElse(defaultValue);
+    }
+
+    @Override
+    public <T> Optional<T> getByKey(String key, Class<T> valueType) {
+        return getByKey(key).map(value -> PropertyEnum.convertTo(value.toString(), valueType));
+    }
+
+    @Override
+    public <T extends Enum<T>> Optional<T> getEnumByProperty(PropertyEnum property, Class<T> valueType) {
+        return getByProperty(property).map(value -> PropertyEnum.convertToEnum(value.toString(), valueType));
+    }
+
+    @Override
+    public <T extends Enum<T>> T getEnumByPropertyOrDefault(PropertyEnum property, Class<T> valueType, T defaultValue) {
+        return getEnumByProperty(property, valueType).orElse(defaultValue);
+    }
+
+    @Override
+    public <V, E extends ValueEnum<V>> Optional<E> getValueEnumByProperty(PropertyEnum property, Class<V> valueType, Class<E> enumType) {
+        return getByProperty(property).map(value -> ValueEnum.valueToEnum(enumType, PropertyEnum.convertTo(value.toString(), valueType)));
+    }
+
+    @Override
+    public <V, E extends ValueEnum<V>> E getValueEnumByPropertyOrDefault(PropertyEnum property, Class<V> valueType, Class<E> enumType, E defaultValue) {
+        return getValueEnumByProperty(property, valueType, enumType).orElse(defaultValue);
+    }
+
+    @Override
+    public int getPostPageSize() {
+        try {
+            return getByPropertyOrDefault(PostProperties.INDEX_PAGE_SIZE, Integer.class, DEFAULT_COMMENT_PAGE_SIZE);
+        } catch (NumberFormatException e) {
+            log.error(PostProperties.INDEX_PAGE_SIZE.getValue() + " option is not a number format", e);
+            return DEFAULT_POST_PAGE_SIZE;
+        }
+    }
+
+    @Override
+    public int getCommentPageSize() {
+        try {
+            return getByPropertyOrDefault(CommentProperties.PAGE_SIZE, Integer.class, DEFAULT_COMMENT_PAGE_SIZE);
+        } catch (NumberFormatException e) {
+            log.error(CommentProperties.PAGE_SIZE.getValue() + " option is not a number format", e);
+            return DEFAULT_COMMENT_PAGE_SIZE;
+        }
+    }
+
+    @Override
+    public int getRssPageSize() {
+        try {
+            return getByPropertyOrDefault(PostProperties.RSS_PAGE_SIZE, Integer.class, DEFAULT_COMMENT_PAGE_SIZE);
+        } catch (NumberFormatException e) {
+            log.error(PostProperties.RSS_PAGE_SIZE.getValue() + " setting is not a number format", e);
+            return DEFAULT_RSS_PAGE_SIZE;
+        }
+    }
+
+    @Override
+    public Zone getQnYunZone() {
+        return getByProperty(QiniuOssProperties.OSS_ZONE).map(qiniuZone -> {
+
+            Zone zone;
+            switch (qiniuZone.toString()) {
+                case "z0":
+                    zone = Zone.zone0();
+                    break;
+                case "z1":
+                    zone = Zone.zone1();
+                    break;
+                case "z2":
+                    zone = Zone.zone2();
+                    break;
+                case "na0":
+                    zone = Zone.zoneNa0();
+                    break;
+                case "as0":
+                    zone = Zone.zoneAs0();
+                    break;
+                default:
+                    // Default is detecting zone automatically
+                    zone = Zone.autoZone();
+            }
+            return zone;
+
+        }).orElseGet(Zone::autoZone);
+    }
+
+    @Override
+    public Locale getLocale() {
+        return getByProperty(BlogProperties.BLOG_LOCALE).map(localeStr -> {
+            try {
+                return Locale.forLanguageTag(localeStr.toString());
+            } catch (Exception e) {
+                return Locale.getDefault();
+            }
+        }).orElseGet(Locale::getDefault);
+    }
+
+    @Override
+    public String getBlogBaseUrl() {
+        // Get server port
+        String serverPort = applicationContext.getEnvironment().getProperty("server.port", "8080");
+
+        String blogUrl = getByProperty(BlogProperties.BLOG_URL).orElse("").toString();
+
+        if (StrUtil.isNotBlank(blogUrl)) {
+            blogUrl = StrUtil.removeSuffix(blogUrl, "/");
+        } else {
+            if (XBlogProperties.isProductionEnv()) {
+                blogUrl = String.format("http://%s:%s", "127.0.0.1", serverPort);
+            } else {
+                blogUrl = String.format("http://%s:%s", XBlogUtils.getMachineIP(), serverPort);
+            }
+        }
+
+        return blogUrl;
+    }
+
+    @Override
+    public String getBlogTitle() {
+        return getByProperty(BlogProperties.BLOG_TITLE).orElse("").toString();
+    }
+
+    @Override
+    public long getBirthday() {
+        return getByProperty(PrimaryProperties.BIRTHDAY, Long.class).orElseGet(() -> {
+            long currentTime = DateUtils.now().getTime();
+            saveProperty(PrimaryProperties.BIRTHDAY, String.valueOf(currentTime));
+            return currentTime;
+        });
+    }
+
+    @Override
+    public PostPermalinkType getPostPermalinkType() {
+        return getEnumByPropertyOrDefault(PermalinkProperties.POST_PERMALINK_TYPE, PostPermalinkType.class, PostPermalinkType.DEFAULT);
+    }
+
+    @Override
+    public String getSheetPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.SHEET_PREFIX, String.class, PermalinkProperties.SHEET_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getLinksPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.LINKS_PREFIX, String.class, PermalinkProperties.LINKS_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getPhotosPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.PHOTOS_PREFIX, String.class, PermalinkProperties.PHOTOS_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getJournalsPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.JOURNALS_PREFIX, String.class, PermalinkProperties.JOURNALS_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getArchivesPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.ARCHIVES_PREFIX, String.class, PermalinkProperties.ARCHIVES_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getCategoriesPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.CATEGORIES_PREFIX, String.class, PermalinkProperties.CATEGORIES_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getTagsPrefix() {
+        return getByPropertyOrDefault(PermalinkProperties.TAGS_PREFIX, String.class, PermalinkProperties.TAGS_PREFIX.defaultValue());
+    }
+
+    @Override
+    public String getPathSuffix() {
+        return getByPropertyOrDefault(PermalinkProperties.PATH_SUFFIX, String.class, PermalinkProperties.PATH_SUFFIX.defaultValue());
+    }
+
+    @Override
+    public Boolean isEnabledAbsolutePath() {
+        return getByPropertyOrDefault(OtherProperties.GLOBAL_ABSOLUTE_PATH_ENABLED, Boolean.class, true);
+    }
+
+    @Override
+    public List<OptionDTO> replaceUrl(String oldUrl, String newUrl) {
+        List<Option> options = listAll();
+        List<Option> replaced = new ArrayList<>();
+        options.forEach(option -> {
+            if (StringUtils.isNotEmpty(option.getValue())) {
+                option.setValue(option.getValue().replaceAll(oldUrl, newUrl));
+            }
+            replaced.add(option);
+        });
+        List<Option> updated = updateInBatch(replaced);
+        publishOptionUpdatedEvent();
+        return updated.stream().map(this::convertToDto).collect(Collectors.toList());
+    }
+
+    @Override
+    public OptionSimpleDTO convertToDto(Option option) {
+        Assert.notNull(option, "Option must not be null");
+
+        return new OptionSimpleDTO().convertFrom(option);
+    }
+
+    private void cleanCache() {
+        cacheStore.delete(OPTIONS_KEY);
+    }
+
+    private void publishOptionUpdatedEvent() {
+        flush();
+        cleanCache();
+        eventPublisher.publishEvent(new OptionUpdatedEvent(this));
+    }
+}
+

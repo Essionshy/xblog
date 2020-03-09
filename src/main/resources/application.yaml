@@ -1,0 +1,46 @@
+server:
+  port: 8090
+  forward-headers-strategy: native
+  compression:
+    enabled: false
+spring:
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+  devtools:
+    add-properties: false
+  output:
+    ansi:
+      enabled: always
+  datasource:
+    #type: com.zaxxer.hikari.HikariDataSource
+    driver-class-name: com.mysql.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/xblog
+    username: root
+    password: root-xz
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    open-in-view: false
+    database-platform: org.hibernate.dialect.MySQL5InnoDBDialect
+  flyway:
+    enabled: false
+  servlet:
+    multipart:
+      max-file-size: 10240MB
+      max-request-size: 10240MB
+      location: ${java.io.tmpdir}
+management:
+  endpoints:
+    web:
+      base-path: /api/admin/actuator
+      exposure:
+        include: ['httptrace', 'metrics','env','logfile','health']
+logging:
+  level:
+    com.tingyu.xblog.app: INFO
+  file:
+    path: ${user.home}/.xblog/logs
+
+xblog:
+  download-timeout: 5m

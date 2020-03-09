@@ -1,0 +1,89 @@
+package com.tingyu.xblog.app.utils;
+
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.config.RequestConfig;
+import org.springframework.core.io.ByteArrayResource;
+
+import java.security.KeyManagementException;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+
+/**
+ * Http client utilities.
+ *
+ * @author johnniang
+ * @date 3/29/19
+ */
+public class HttpClientUtils {
+
+    /**
+     * Timeout (Default is 5s).
+     */
+    private final static int TIMEOUT = 5000;
+
+    private HttpClientUtils() {
+    }
+
+    /**
+     * Creates https client.
+     *
+     * @param timeout connection timeout (ms)
+     * @return https client
+     * @throws KeyStoreException        key store exception
+     * @throws NoSuchAlgorithmException no such algorithm exception
+     * @throws KeyManagementException   key management exception
+     */
+//    @NonNull
+//    public static CloseableHttpClient createHttpsClient(int timeout) throws KeyStoreException, NoSuchAlgorithmException, KeyManagementException {
+//        SSLContext sslContext = new SSLContextBuilder()
+//            .loadTrustMaterial(null, (certificate, authType) -> true)
+//            .build();
+//
+//        return HttpClients.custom()
+//            .setSSLContext(sslContext)
+//            .setSSLHostnameVerifier(new NoopHostnameVerifier())
+//            .setDefaultRequestConfig(getReqeustConfig(timeout))
+//            .build();
+//    }
+
+    /**
+     * Gets request config.
+     *
+     * @param timeout connection timeout (ms)
+     * @return request config
+     */
+    private static RequestConfig getReqeustConfig(int timeout) {
+        return RequestConfig.custom()
+            .setConnectTimeout(timeout)
+            .setConnectionRequestTimeout(timeout)
+            .setSocketTimeout(timeout)
+            .build();
+    }
+
+    public static HttpClient createHttpsClient(int toMillis) {
+        return null;
+    }
+
+
+    /**
+     * Multipart file resource.
+     *
+     * @author johnniang
+     */
+    public static class MultipartFileResource extends ByteArrayResource {
+
+        private final String filename;
+
+        public MultipartFileResource(byte[] buf, String filename) {
+            super(buf);
+            this.filename = filename;
+        }
+
+        @Override
+        public String getFilename() {
+            return this.filename;
+        }
+
+    }
+
+}

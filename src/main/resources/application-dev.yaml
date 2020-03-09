@@ -1,0 +1,61 @@
+server:
+  port: 8090
+  forward-headers-strategy: native
+  compression:
+    enabled: false
+spring:
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+  output:
+    ansi:
+      enabled: always
+  datasource:
+   # type: com.zaxxer.hikari.HikariDataSource
+
+
+    driver-class-name: com.mysql.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/xblog
+    username: root
+    password: root-xz
+
+    # MySQL database configuration.
+  #    driver-class-name: com.mysql.cj.jdbc.Driver
+  #    url: jdbc:mysql://127.0.0.1:3306/halo_dev?characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+  #    username: root
+  #    password: 123456
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    open-in-view: false
+  flyway:
+    enabled: false
+  servlet:
+    multipart:
+      max-file-size: 10240MB
+      max-request-size: 10240MB
+  cache:
+    type: none
+management:
+  endpoints:
+    web:
+      base-path: /api/admin/actuator
+      exposure:
+        include: ['httptrace', 'metrics','env','logfile','health']
+logging:
+  level:
+    com.tingyu.xblog.app: DEBUG
+    org.hibernate: INFO
+    org.hibernate.type.descriptor.sql.BasicBinder: INFO
+    org.hibernate.type.descriptor.sql.BasicExtractor: INFO
+  file:
+    path: ${user.home}/xblog-dev/logs
+
+xblog:
+  doc-disabled: false
+  production-env: false
+  auth-enabled: true
+  mode: development
+  workDir: ${user.home}/xblog-dev/
+  cache: level
